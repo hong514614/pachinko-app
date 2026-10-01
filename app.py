@@ -25,7 +25,7 @@ cookie_input = st.text_area(
 
 base_url = st.text_input(
     "請貼上店鋪網址 (或任意該店之頁面 URL):",
-    value="https://sunpo-to.a.p-moba.net/game_ctm_machine_detail.php?site=dmm&id=228"
+    value="https://sunpo-to.a.p-moba.net/game_ctm_machine_detail.php?site=dmm&id=1"
 )
 
 col_num1, col_num2 = st.columns(2)
@@ -41,7 +41,7 @@ with col_date1:
 with col_date2:
     selected_end_date = st.date_input("結束日期:", value=today)
 
-ignore_date_filter = st.checkbox("⚠️ 忽略日期篩選（抓取該頁面上出現的所有歷史數據）", value=True, help="勾選此項可防止因為日期計算時差導致資料被過濾掉")
+ignore_date_filter = st.checkbox("⚠️ 忽略日期篩選（匯出畫面上擷取到的所有數據）", value=True)
 
 btn_start = st.button("🚀 開始擷取數據", use_container_width=True)
 
@@ -55,6 +55,7 @@ def clean_cookie(raw_cookie):
     return cookie_str
 
 def extract_led_number(element):
+    """解析 LED 數字 (含圖片與文字)"""
     if not element:
         return "-"
     imgs = element.find_all('img')
@@ -95,13 +96,14 @@ if btn_start:
     else:
         st.info("⏳ 任務啟動中...")
 
+        # 確保網址格式正確
         if "id=" in base_url:
             url_template = re.sub(r'id=\d+', 'id={}', base_url)
         else:
             url_template = base_url + "&id={}" if "?" in base_url else base_url + "?id={}"
 
         headers = {
-            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
             'X-Requested-With': 'com.dmm.ptown',
@@ -111,24 +113,13 @@ if btn_start:
 
         machine_ids = list(range(int(start_num), int(end_num) + 1))
         results = []
-        base_date = datetime.now()
+        base_date = datetime.now().date()
 
-        date_mapping = [
-            ("今日", base_date),
-            ("昨日", base_date - timedelta(days=1)),
-            ("2日前", base_date - timedelta(days=2)),
-            ("3日前", base_date - timedelta(days=3)),
-            ("4日前", base_date - timedelta(days=4)),
-            ("5日前", base_date - timedelta(days=5)),
-            ("6日前", base_date - timedelta(days=6)),
-        ]
-
-        pachinko_count = 0
         total_machines = len(machine_ids)
 
         progress_bar = st.progress(0)
         status_text = st.empty()
-        log_expander = st.expander("📄 執行細節與日誌", expanded=True)
+        log_expander = st.expander("📄 執行日誌", expanded=True)
         log_box = log_expander.empty()
         log_messages = [f"開始掃描台號範圍：{start_num} ~ {end_num}"]
         log_box.text("\n".join(log_messages))
@@ -156,86 +147,68 @@ if btn_start:
                     continue
 
                 soup = BeautifulSoup(resp.text, 'html.parser')
-                title = soup.title.string.strip() if soup.title else ""
+                full_text = soup.get_text()
 
-                if "遊技データをご覧のお客様へ" in title:
+                if "遊技データをご覧のお客様へ" in full_text:
                     log_messages.append(f"\n  ❌ 台號 {m_id} 被驗證頁面攔截！請更新 Cookie。")
                     log_box.text("\n".join(log_messages[-15:]))
                     st.error(f"台號 {m_id} 被驗證頁面攔截！請替換最新 Cookie。")
                     break
 
-                clean_title = title.split('|')[0].strip() if '|' in title else title
-                
-                # 嘗試多種 class 選擇器
-                items = soup.find_all('div', class_=lambda c: c and any(k in c for k in ['c-data-pachinko__item', 'item', 'data-item', 'pachinko']))
-                
-                if not items:
-                    # 備用方案：抓取所有包含 text/img 的 div
-                    items = soup.find_all('div', class_=lambda c: c and ('text' in c or 'img' in c))
+                # 解析機種名稱
+                title_tag = soup.find('div', class_=lambda c: c and 'machine-name' in str(c)) or soup.title
+                clean_title = title_tag.get_text(strip=True) if title_tag else "未知機種"
+                clean_title = clean_title.split('|')[0].strip()
 
-                if not items:
-                    log_messages.append(f"  ⚠️ 台號 {m_id}: 網頁解析不到數據區塊 (HTML 結構可能變更)")
-                    log_box.text("\n".join(log_messages[-15:]))
-                    continue
-
-                full_text = soup.get_text()
+                # 解析費率 (例如 0.562円パチンコ 或 4円)
                 rate_match = re.search(r'(\d+(?:\.\d+)?)\s*円', full_text)
                 rate_str = f"{rate_match.group(1)}円" if rate_match else "-"
 
-                pachinko_count += 1
-                day_idx = 0
-                raw_date, real_datetime = date_mapping[day_idx]
-                real_date_obj = real_datetime.date()
+                # 針對 P-Moba「左右雙欄 (今日/昨日)」結構做區域拆分
+                # 尋找所有包含數據區塊的包裹容器
+                columns = soup.find_all('div', class_=lambda c: c and any(k in str(c) for k in ['data-block', 'day-data', 'data_box', 'flex-1', 'col']))
+                
+                if not columns or len(columns) < 2:
+                    # 備用：若無特定 col 包裹，直接搜尋大當區塊
+                    columns = soup.find_all('div', class_=lambda c: c and 'item' in str(c))
 
-                current_data = {
-                    '台號': m_id,
-                    '玩法費率': rate_str,
-                    '機種名稱': clean_title,
-                    '西元日期': real_date_obj.strftime("%Y-%m-%d"),
-                    '_date_obj': real_date_obj
-                }
+                # 建立兩天數據容器：[今日(0天前), 昨日(1天前)]
+                day_data_list = [
+                    {'台號': m_id, '玩法費率': rate_str, '機種名稱': clean_title, '西元日期': (base_date).strftime("%Y-%m-%d"), '_date': base_date},
+                    {'台號': m_id, '玩法費率': rate_str, '機種名稱': clean_title, '西元日期': (base_date - timedelta(days=1)).strftime("%Y-%m-%d"), '_date': base_date - timedelta(days=1)}
+                ]
 
-                parsed_keys_count = 0
+                # 抓取頁面上所有 item 項目
+                items = soup.find_all('div', class_=lambda c: c and 'item' in str(c))
+
+                items_extracted = 0
                 for item in items:
-                    text_div = item.find('div', class_=lambda c: c and 'text' in c)
+                    text_div = item.find('div', class_=lambda c: c and ('text' in str(c) or 'label' in str(c)))
                     if not text_div:
-                        label = item.get_text(strip=True)
-                    else:
-                        label = text_div.get_text(strip=True)
-
-                    if not label or len(label) > 15:
                         continue
+                    label = text_div.get_text(strip=True)
 
-                    img_div = item.find('div', class_=lambda c: c and ('images' in c or 'img' in c))
+                    img_div = item.find('div', class_=lambda c: c and ('images' in str(c) or 'img' in str(c)))
                     val = extract_led_number(img_div if img_div else item)
 
-                    if label in current_data:
-                        if ignore_date_filter or (selected_start_date <= current_data['_date_obj'] <= selected_end_date):
-                            results.append(current_data)
+                    if not label or val == "-":
+                        continue
 
-                        day_idx += 1
-                        if day_idx < len(date_mapping):
-                            raw_date, real_datetime = date_mapping[day_idx]
-                            real_date_obj = real_datetime.date()
-                        else:
-                            real_date_obj = (base_date - timedelta(days=day_idx)).date()
+                    # 如果「今日」還沒填過這個標籤，填入今日；若填過了，填入「昨日」
+                    if label not in day_data_list[0]:
+                        day_data_list[0][label] = val
+                        items_extracted += 1
+                    elif label not in day_data_list[1]:
+                        day_data_list[1][label] = val
+                        items_extracted += 1
 
-                        current_data = {
-                            '台號': m_id,
-                            '玩法費率': rate_str,
-                            '機種名稱': clean_title,
-                            '西元日期': real_date_obj.strftime("%Y-%m-%d"),
-                            '_date_obj': real_date_obj
-                        }
-                    
-                    current_data[label] = val
-                    parsed_keys_count += 1
+                # 驗證並儲存符合條件的資料
+                for d in day_data_list:
+                    if len(d) > 5: # 確定有抓到 LED 數值欄位
+                        if ignore_date_filter or (selected_start_date <= d['_date'] <= selected_end_date):
+                            results.append(d)
 
-                if current_data and len(current_data) > 4:
-                    if ignore_date_filter or (selected_start_date <= current_data['_date_obj'] <= selected_end_date):
-                        results.append(current_data)
-
-                log_messages.append(f"台號 {m_id:3d}: 解析成功！抓到 {parsed_keys_count} 個數據項目 ({clean_title[:10]})")
+                log_messages.append(f"台號 {m_id:3d}: [P] [{rate_str}] 解析成功！(擷取到 {items_extracted} 個數據項目)")
                 log_box.text("\n".join(log_messages[-15:]))
 
             except Exception as e:
@@ -247,15 +220,15 @@ if btn_start:
         # 完成與數據展現
         if results:
             df = pd.DataFrame(results)
-            if '_date_obj' in df.columns:
-                df = df.drop(columns=['_date_obj'])
+            if '_date' in df.columns:
+                df = df.drop(columns=['_date'])
 
             base_cols = ['台號', '玩法費率', '機種名稱', '西元日期']
             existing_base = [c for c in base_cols if c in df.columns]
             other_cols = [c for c in df.columns if c not in existing_base]
             df = df[existing_base + other_cols]
 
-            st.success(f"🎉 抓取完成！共取得 {len(results)} 筆數據")
+            st.success(f"🎉 抓取完成！共取得 {len(results)} 筆歷史數據")
             st.dataframe(df)
 
             import io
@@ -272,4 +245,4 @@ if btn_start:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.error("❌ 依然未取得數據。請查看上方【執行細節與日誌】中的訊息。")
+            st.error("❌ 依然未取得數據，請確認 Cookie 是否過期。")
