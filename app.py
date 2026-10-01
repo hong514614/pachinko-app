@@ -41,11 +41,12 @@ with col_date1:
 with col_date2:
     selected_end_date = st.date_input("結束日期:", value=today)
 
+ignore_date_filter = st.checkbox("⚠️ 忽略日期篩選（抓取該頁面上出現的所有歷史數據）", value=True, help="勾選此項可防止因為日期計算時差導致資料被過濾掉")
+
 btn_start = st.button("🚀 開始擷取數據", use_container_width=True)
 
 # 2. 輔助解析函式
 def clean_cookie(raw_cookie):
-    """自動清除可能誤貼的 'Cookie: ' 前綴"""
     if not raw_cookie:
         return ""
     cookie_str = raw_cookie.strip()
@@ -54,7 +55,6 @@ def clean_cookie(raw_cookie):
     return cookie_str
 
 def extract_led_number(element):
-    """解析數字或圖片 LED 數字 (複製自原 EXE 邏輯)"""
     if not element:
         return "-"
     imgs = element.find_all('img')
@@ -95,15 +95,14 @@ if btn_start:
     else:
         st.info("⏳ 任務啟動中...")
 
-        # 替換 URL 中的 id 參數基礎格式
         if "id=" in base_url:
             url_template = re.sub(r'id=\d+', 'id={}', base_url)
         else:
             url_template = base_url + "&id={}" if "?" in base_url else base_url + "?id={}"
 
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Linux; Android 12; SM-S938U Build/V417IR; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/110.0.5481.154 Mobile Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
             'X-Requested-With': 'com.dmm.ptown',
             'Referer': 'https://sunpo-to.a.p-moba.net/',
@@ -129,20 +128,18 @@ if btn_start:
 
         progress_bar = st.progress(0)
         status_text = st.empty()
-        log_expander = st.expander("📄 執行日誌", expanded=True)
+        log_expander = st.expander("📄 執行細節與日誌", expanded=True)
         log_box = log_expander.empty()
-        log_messages = [f"開始掃描台號範圍：{start_num} ~ {end_num}", f"篩選日期範圍：{selected_start_date} 至 {selected_end_date}"]
+        log_messages = [f"開始掃描台號範圍：{start_num} ~ {end_num}"]
         log_box.text("\n".join(log_messages))
 
         for idx, m_id in enumerate(machine_ids, start=1):
             url = url_template.format(m_id)
 
-            # 更新進度條與狀態
             progress = idx / total_machines
             progress_bar.progress(progress)
             status_text.text(f"正在擷取台號 {m_id} ({idx}/{total_machines})...")
 
-            # 防封鎖休眠
             if idx > 1 and idx % 35 == 0:
                 pause_time = random.uniform(8, 15)
                 msg = f"☕ 已連續掃描 {idx} 台，自動暫停 {pause_time:.1f} 秒..."
@@ -151,11 +148,10 @@ if btn_start:
                 time.sleep(pause_time)
 
             try:
-                # 使用 curl_cffi 模擬 Chrome 發送請求
                 resp = requests.get(url, headers=headers, timeout=15, impersonate="chrome120")
 
                 if resp.status_code != 200:
-                    log_messages.append(f"  ✕ 台號 {m_id} 回傳狀態碼 {resp.status_code}，跳過")
+                    log_messages.append(f"  ✕ 台號 {m_id} HTTP 狀態碼：{resp.status_code}")
                     log_box.text("\n".join(log_messages[-15:]))
                     continue
 
@@ -163,27 +159,26 @@ if btn_start:
                 title = soup.title.string.strip() if soup.title else ""
 
                 if "遊技データをご覧のお客様へ" in title:
-                    log_messages.append(f"\n  ❌ 台號 {m_id} 被驗證頁面攔截！請替換最新 Cookie。")
+                    log_messages.append(f"\n  ❌ 台號 {m_id} 被驗證頁面攔截！請更新 Cookie。")
                     log_box.text("\n".join(log_messages[-15:]))
                     st.error(f"台號 {m_id} 被驗證頁面攔截！請替換最新 Cookie。")
                     break
 
                 clean_title = title.split('|')[0].strip() if '|' in title else title
-                items = soup.find_all('div', class_=lambda c: c and ('c-data-pachinko__item' in c or 'item' in c))
+                
+                # 嘗試多種 class 選擇器
+                items = soup.find_all('div', class_=lambda c: c and any(k in c for k in ['c-data-pachinko__item', 'item', 'data-item', 'pachinko']))
+                
+                if not items:
+                    # 備用方案：抓取所有包含 text/img 的 div
+                    items = soup.find_all('div', class_=lambda c: c and ('text' in c or 'img' in c))
 
                 if not items:
+                    log_messages.append(f"  ⚠️ 台號 {m_id}: 網頁解析不到數據區塊 (HTML 結構可能變更)")
+                    log_box.text("\n".join(log_messages[-15:]))
                     continue
-
-                if clean_title.startswith('S') or "スロット" in clean_title or "パチスロ" in clean_title:
-                    if not clean_title.startswith('P'):
-                        time.sleep(0.3)
-                        continue
 
                 full_text = soup.get_text()
-                if "スロット" in full_text and "パチンコ" not in full_text:
-                    time.sleep(0.3)
-                    continue
-
                 rate_match = re.search(r'(\d+(?:\.\d+)?)\s*円', full_text)
                 rate_str = f"{rate_match.group(1)}円" if rate_match else "-"
 
@@ -200,18 +195,22 @@ if btn_start:
                     '_date_obj': real_date_obj
                 }
 
+                parsed_keys_count = 0
                 for item in items:
                     text_div = item.find('div', class_=lambda c: c and 'text' in c)
                     if not text_div:
+                        label = item.get_text(strip=True)
+                    else:
+                        label = text_div.get_text(strip=True)
+
+                    if not label or len(label) > 15:
                         continue
 
-                    label = text_div.get_text(strip=True)
                     img_div = item.find('div', class_=lambda c: c and ('images' in c or 'img' in c))
                     val = extract_led_number(img_div if img_div else item)
 
                     if label in current_data:
-                        # 判斷上一天資料是否在範圍內
-                        if selected_start_date <= current_data['_date_obj'] <= selected_end_date:
+                        if ignore_date_filter or (selected_start_date <= current_data['_date_obj'] <= selected_end_date):
                             results.append(current_data)
 
                         day_idx += 1
@@ -228,14 +227,15 @@ if btn_start:
                             '西元日期': real_date_obj.strftime("%Y-%m-%d"),
                             '_date_obj': real_date_obj
                         }
+                    
                     current_data[label] = val
+                    parsed_keys_count += 1
 
-                # 處理最後一天資料
-                if current_data and len(current_data) > 5:
-                    if selected_start_date <= current_data['_date_obj'] <= selected_end_date:
+                if current_data and len(current_data) > 4:
+                    if ignore_date_filter or (selected_start_date <= current_data['_date_obj'] <= selected_end_date):
                         results.append(current_data)
 
-                log_messages.append(f"台號 {m_id:3d}: [P] [{rate_str}] 解析成功 ({clean_title})")
+                log_messages.append(f"台號 {m_id:3d}: 解析成功！抓到 {parsed_keys_count} 個數據項目 ({clean_title[:10]})")
                 log_box.text("\n".join(log_messages[-15:]))
 
             except Exception as e:
@@ -251,13 +251,13 @@ if btn_start:
                 df = df.drop(columns=['_date_obj'])
 
             base_cols = ['台號', '玩法費率', '機種名稱', '西元日期']
-            other_cols = [c for c in df.columns if c not in base_cols]
-            df = df[base_cols + other_cols]
+            existing_base = [c for c in base_cols if c in df.columns]
+            other_cols = [c for c in df.columns if c not in existing_base]
+            df = df[existing_base + other_cols]
 
-            st.success(f"🎉 抓取完成！共取得 {pachinko_count} 台數據")
+            st.success(f"🎉 抓取完成！共取得 {len(results)} 筆數據")
             st.dataframe(df)
 
-            # Excel 下載
             import io
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
@@ -272,4 +272,4 @@ if btn_start:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.error("❌ 未取得符合選取日期範圍的數據，請確認日期與 Cookie 設定。")
+            st.error("❌ 依然未取得數據。請查看上方【執行細節與日誌】中的訊息。")
