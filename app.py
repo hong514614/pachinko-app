@@ -151,7 +151,7 @@ if btn_start:
                 time.sleep(pause_time)
 
             try:
-                # 使用 curl_cffi 模擬 Chrome 發送請求，解決驗證頁面攔截問題
+                # 使用 curl_cffi 模擬 Chrome 發送請求
                 resp = requests.get(url, headers=headers, timeout=15, impersonate="chrome120")
 
                 if resp.status_code != 200:
@@ -189,14 +189,15 @@ if btn_start:
 
                 pachinko_count += 1
                 day_idx = 0
-                raw_date, real_date = date_mapping[day_idx]
+                raw_date, real_datetime = date_mapping[day_idx]
+                real_date_obj = real_datetime.date()
 
                 current_data = {
                     '台號': m_id,
                     '玩法費率': rate_str,
                     '機種名稱': clean_title,
-                    '西元日期': real_date.strftime("%Y-%m-%d"),
-                    '_date_obj': real_date.date()
+                    '西元日期': real_date_obj.strftime("%Y-%m-%d"),
+                    '_date_obj': real_date_obj
                 }
 
                 for item in items:
@@ -209,24 +210,27 @@ if btn_start:
                     val = extract_led_number(img_div if img_div else item)
 
                     if label in current_data:
+                        # 判斷上一天資料是否在範圍內
                         if selected_start_date <= current_data['_date_obj'] <= selected_end_date:
                             results.append(current_data)
 
                         day_idx += 1
                         if day_idx < len(date_mapping):
-                            raw_date, real_date = date_mapping[day_idx]
+                            raw_date, real_datetime = date_mapping[day_idx]
+                            real_date_obj = real_datetime.date()
                         else:
-                            raw_date, real_date = f"第{day_idx+1}天", base_date - timedelta(days=day_idx)
+                            real_date_obj = (base_date - timedelta(days=day_idx)).date()
 
                         current_data = {
                             '台號': m_id,
                             '玩法費率': rate_str,
                             '機種名稱': clean_title,
-                            '西元日期': real_date.strftime("%Y-%m-%d"),
-                            '_date_obj': real_date.date()
+                            '西元日期': real_date_obj.strftime("%Y-%m-%d"),
+                            '_date_obj': real_date_obj
                         }
                     current_data[label] = val
 
+                # 處理最後一天資料
                 if current_data and len(current_data) > 5:
                     if selected_start_date <= current_data['_date_obj'] <= selected_end_date:
                         results.append(current_data)
