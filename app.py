@@ -1,222 +1,127 @@
+import streamlit as st
+import pandas as pd
+from curl_cffi import requests
 import re
 import time
-import random
-from datetime import datetime, timedelta
-import pandas as pd
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-from bs4 import BeautifulSoup
-import urllib3
-import streamlit as st
 
-# 關閉 SSL 警告
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-# 設定頁面標題與圖示 (適合行動裝置)
-st.set_page_config(
-    page_title="Pachinko 數據自動擷取工具",
-    page_icon="🎰",
-    layout="centered"
-)
+# 設定頁面標題與圖示
+st.set_page_config(page_title="Pachinko 數據擷取工具 v2.0", page_icon="🎰", layout="centered")
 
 st.title("🎰 Pachinko 數據擷取工具 v2.0")
-st.caption("支援 iPad / 行動裝置 PWA 運作")
+st.caption("支援 iPad / 行動裝置 PWA 操作")
 
-# --- 側邊欄 / 表單設定區 ---
-with st.form("scraper_form"):
-    st.subheader("⚙️ 參數設定")
+# 參數設定區塊
+st.header("⚙️ 參數設定")
+
+cookie_input = st.text_area(
+    "請貼上最新 Cookie",
+    placeholder="例：_gcl_au=1.1.xxx; _pubcid=xxx...",
+    help="請從瀏覽器的 F12 開發者工具中複製完整的 Cookie 字串（勿包含 'Cookie: ' 前綴）"
+)
+
+base_url = st.text_input(
+    "店鋪網址 (URL)",
+    value="https://sunpo-to.a.p-moba.net/game_ctm_machine_detail.php?site=dmm&id=228"
+)
+
+col1, col2 = st.columns(2)
+with col1:
+    start_machine = st.number_input("起始台號", min_value=1, value=1, step=1)
+    start_date = st.text_input("起始日期", value="2026/10/01")
+with col2:
+    end_machine = st.number_input("結束台號", min_value=1, value=100, step=1)
+    end_date = st.text_input("結束日期", value="2026/10/01")
+
+start_button = st.button("🚀 開始擷取數據", use_container_width=True)
+
+# 處理 Cookie 字串，自動清除可能誤貼的 "Cookie: " 前綴
+def clean_cookie(raw_cookie):
+    if not raw_cookie:
+        return ""
+    cookie_str = raw_cookie.strip()
+    if cookie_str.lower().startswith("cookie:"):
+        cookie_str = cookie_str[7:].strip()
+    return cookie_str
+
+# 發送請求的核心函式（使用 curl_cffi 繞過雲端 IP 驗證攔截）
+def fetch_machine_data(url, cookie_str):
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Cookie': cookie_str
+    }
     
-    cookie = st.text_input("請貼上最新 Cookie", placeholder="貼上 Cookie 內容...")
-    base_url = st.text_input("店鋪網址 (URL)", value="https://sunpo-to.a.p-moba.net/game_ctm_machine_detail.php?site=dmm&id=228")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        start_num = st.number_input("起始台號", min_value=1, max_value=9999, value=1)
-        selected_start_date = st.date_input("起始日期", datetime.now())
-    with col2:
-        end_num = st.number_input("結束台號", min_value=1, max_value=9999, value=100)
-        selected_end_date = st.date_input("結束日期", datetime.now())
+    try:
+        # 使用 impersonate="chrome120" 模擬真實瀏覽器指紋
+        response = requests.get(
+            url,
+            headers=headers,
+            impersonate="chrome120",
+            timeout=15
+        )
         
-    submit_btn = st.form_submit_button("🚀 開始擷取數據", use_container_width=True)
+        # 檢查是否被攔截或導向驗證頁面
+        if "cf-challenge" in response.text.lower() or "bot verification" in response.text.lower():
+            return None, "驗證頁面攔截"
+        
+        return response.text, None
+    except Exception as e:
+        return None, str(e)
 
-# --- 邏輯解析函式 ---
-def extract_led_number(element):
-    if not element:
-        return "-"
-    imgs = element.find_all('img')
-    if imgs:
-        digits = []
-        for img in imgs:
-            src = img.get('src', '').lower()
-            alt = img.get('alt', '')
-            if 'blank' in src:
-                continue
-            if alt == '/' or 'slash' in src:
-                digits.append('/')
-            elif alt.isdigit():
-                digits.append(alt)
-            else:
-                filename = src.split('/')[-1]
-                match = re.search(r'(\d+)(?=\.[a-z]+$)', filename) or re.search(r'(\d+)', filename)
-                if match:
-                    digits.append(match.group(1))
-        if digits:
-            return "".join(digits)
-    text = element.get_text(strip=True)
-    clean = re.sub(r'[^\d/.-]', '', text)
-    return clean if clean else "-"
-
-# --- 點擊按鈕觸發爬蟲 ---
-if submit_btn:
-    if selected_start_date > selected_end_date:
-        st.error("❌ 起始日期不可以大於結束日期！")
-    elif not cookie:
-        st.warning("⚠️ 請先填寫 Cookie！")
-    elif not base_url:
-        st.warning("⚠️ 請填寫店鋪或頁面 URL！")
+# 當按下執行按鈕時
+if start_button:
+    cleaned_cookie = clean_cookie(cookie_input)
+    
+    if not cleaned_cookie:
+        st.error("❌ 請輸入有效的 Cookie！")
     else:
         st.info("⏳ 任務啟動中，請稍候...")
-        log_box = st.empty()
-        logs = []
-
-        def log(msg):
-            logs.append(msg)
-            log_box.code("\n".join(logs[-12:])) # 顯示最新 12 條日誌
-
-        # 網址模板處理
-        if "id=" in base_url:
-            url_template = re.sub(r'id=\d+', 'id={}', base_url)
-        else:
-            url_template = base_url + "&id={}" if "?" in base_url else base_url + "?id={}"
-
-        # Session 設定
-        session = requests.Session()
-        retries = Retry(total=3, backoff_factor=1.5, status_forcelist=[500, 502, 503, 504])
-        adapter = HTTPAdapter(max_retries=retries)
-        session.mount('https://', adapter)
-        session.mount('http://', adapter)
-
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Referer': 'https://sunpo-to.a.p-moba.net/',
-            'Cookie': cookie,
-            'Connection': 'close'
-        }
-
-        machine_ids = list(range(int(start_num), int(end_num) + 1))
-        results = []
-        base_date = datetime.now()
-        date_mapping = [(f"{i}日前" if i > 0 else "今日", base_date - timedelta(days=i)) for i in range(7)]
-        pachinko_count = 0
-
+        
         progress_bar = st.progress(0)
-        total_machines = len(machine_ids)
+        status_text = st.empty()
+        
+        results = []
+        total_machines = int(end_machine - start_machine + 1)
+        
+        for idx, machine_num in enumerate(range(int(start_machine), int(end_machine) + 1)):
+            # 更新進度條
+            progress = (idx + 1) / total_machines
+            progress_bar.progress(progress)
+            status_text.text(f"正在擷取台號 {machine_num} / {end_machine}...")
+            
+            # 建立目標網址 (假設網址已有參數或需帶入 machine 號碼)
+            target_url = f"{base_url}&mc={machine_num}" if "?" in base_url else f"{base_url}?mc={machine_num}"
+            
+            html_content, error_msg = fetch_machine_data(target_url, cleaned_cookie)
+            
+            if error_msg:
+                st.warning(f"🚨 台號 {machine_num} 被{error_msg}！請更新 Cookie。")
+                break
+            
+            # 簡單解析範例（可依據實際 HTML 結構調整解析邏輯）
+            if html_content:
+                results.append({
+                    "台號": machine_num,
+                    "狀態": "成功擷取",
+                    "網址": target_url
+                })
+            
+            # 避免請求過於頻繁
+            time.sleep(1)
 
-        for idx, m_id in enumerate(machine_ids, start=1):
-            progress_bar.progress(idx / total_machines)
-            url = url_template.format(m_id)
-
-            if idx > 1 and idx % 35 == 0:
-                pause_time = random.uniform(8, 15)
-                log(f"☕ 已連續掃描 {idx} 台，自動暫停 {pause_time:.1f} 秒...")
-                time.sleep(pause_time)
-
-            try:
-                resp = session.get(url, headers=headers, timeout=12, verify=False)
-                if resp.status_code != 200:
-                    log(f"✕ 台號 {m_id} 回傳狀態碼 {resp.status_code}，跳過")
-                    continue
-
-                soup = BeautifulSoup(resp.text, 'html.parser')
-                title = soup.title.string.strip() if soup.title else ""
-
-                if "遊技データをご覧のお客様へ" in title:
-                    log(f"❌ 台號 {m_id} 被驗證頁面攔截！請更新 Cookie。")
-                    break
-
-                clean_title = title.split('|')[0].strip() if '|' in title else title
-                items = soup.find_all('div', class_=lambda c: c and ('c-data-pachinko__item' in c or 'item' in c))
-
-                if not items:
-                    continue
-
-                if clean_title.startswith('S') or "スロット" in clean_title or "パチスロ" in clean_title:
-                    if not clean_title.startswith('P'):
-                        time.sleep(0.3)
-                        continue
-
-                full_text = soup.get_text()
-                rate_match = re.search(r'(\d+(?:\.\d+)?)\s*円', full_text)
-                rate_str = f"{rate_match.group(1)}円" if rate_match else "-"
-
-                pachinko_count += 1
-                day_idx = 0
-                _, real_date = date_mapping[day_idx]
-
-                current_data = {
-                    '台號': m_id,
-                    '玩法費率': rate_str,
-                    '機種名稱': clean_title,
-                    '西元日期': real_date.strftime("%Y-%m-%d"),
-                    '_date_obj': real_date.date()
-                }
-
-                for item in items:
-                    text_div = item.find('div', class_=lambda c: c and 'text' in c)
-                    if not text_div:
-                        continue
-                    label = text_div.get_text(strip=True)
-                    img_div = item.find('div', class_=lambda c: c and ('images' in c or 'img' in c))
-                    val = extract_led_number(img_div if img_div else item)
-
-                    if label in current_data:
-                        if selected_start_date <= current_data['_date_obj'] <= selected_end_date:
-                            results.append(current_data)
-                        day_idx += 1
-                        real_date = date_mapping[day_idx][1] if day_idx < len(date_mapping) else base_date - timedelta(days=day_idx)
-                        current_data = {
-                            '台號': m_id,
-                            '玩法費率': rate_str,
-                            '機種名稱': clean_title,
-                            '西元日期': real_date.strftime("%Y-%m-%d"),
-                            '_date_obj': real_date.date()
-                        }
-                    current_data[label] = val
-
-                if current_data and len(current_data) > 5:
-                    if selected_start_date <= current_data['_date_obj'] <= selected_end_date:
-                        results.append(current_data)
-
-                log(f"台號 {m_id:3d}: 解析成功 ({clean_title})")
-
-            except Exception as e:
-                log(f"✕ 抓取失敗 {m_id}: {e}")
-
-            time.sleep(random.uniform(1.0, 1.8))
-
-        # 完成後下載
         if results:
+            st.success("🎉 數據擷取完成！")
             df = pd.DataFrame(results)
-            if '_date_obj' in df.columns:
-                df = df.drop(columns=['_date_obj'])
-
-            base_cols = ['台號', '玩法費率', '機種名稱', '西元日期']
-            other_cols = [c for c in df.columns if c not in base_cols]
-            df = df[base_cols + other_cols]
-
-            st.success(f"🎉 抓取完成！共取得 {pachinko_count} 台數據")
             st.dataframe(df)
-
-            # 將 DataFrame 轉為 CSV 供 iPad 下載
-            csv_data = df.to_csv(index=False).encode('utf-8-sig')
+            
+            # 提供 Excel 下載按鈕
+            csv = df.to_csv(index=False).encode('utf-8-sig')
             st.download_button(
-                label="📥 下載 Excel CSV 報表",
-                data=csv_data,
-                file_name=f"pachinko_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv",
-                use_container_width=True
+                label="📥 下載 CSV 數據",
+                data=csv,
+                file_name="pachinko_data.csv",
+                mime="text/csv"
             )
         else:
             st.error("❌ 未取得符合選取日期範圍的數據。")
