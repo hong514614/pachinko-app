@@ -2,7 +2,6 @@ from datetime import datetime, timedelta
 import io
 import random
 import re
-import socket
 import time
 import pandas as pd
 import requests
@@ -17,31 +16,12 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # 頁面基本設定
 st.set_page_config(
-    page_title="Pachinko 數據自動擷取工具",
+    page_title="Pachinko 數據自動擷取工具 (Cloud版)",
     page_icon="🎰",
     layout="centered",
 )
 
-st.title("🎰 Pachinko 數據自動擷取工具 v2.0 (Web版)")
-
-
-# 取得本地 LAN IP 供 iPad 連線參考
-def get_local_ip():
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return "您的電腦IP"
-
-
-local_ip = get_local_ip()
-st.info(
-    f"💡 **iPad 連線提示**：確保電腦與 iPad 在同一個 Wi-Fi 下，iPad 瀏覽器輸入 `http://{local_ip}:8501` 即可使用！"
-)
-
+st.title("🎰 Pachinko 數據自動擷取工具 v2.1 (Streamlit Cloud + Residential Proxy 版)")
 
 # ================= 輔助解析函式 =================
 def extract_led_number(element):
@@ -76,7 +56,18 @@ def extract_led_number(element):
 
 # ================= UI 設定區塊 =================
 
-# 1. Cookie 與 URL 區塊
+# 1. Proxy 設定區塊 (方案 B 核心)
+with st.expander("🌐 日本住宅代理 IP 設定 (Proxy Configuration)", expanded=True):
+    st.markdown(
+        "因為部署於 Streamlit Cloud (AWS 機房)，必須掛載**日本住宅代理 (Japan Residential Proxy)** 才能避開驗證頁面。"
+    )
+    proxy_input = st.text_input(
+        "代理伺服器 URL (Proxy URL):",
+        placeholder="http://username:password@proxy.example.com:8080",
+        help="格式例如: http://user:pass@ip:port 或 http://ip:port",
+    )
+
+# 2. Cookie 與 URL 區塊
 cookie_input = st.text_input(
     "請貼上最新 Cookie:",
     type="password",
@@ -87,14 +78,14 @@ base_url = st.text_input(
     value="https://sunpo-to.a.p-moba.net/game_ctm_machine_detail.php?site=dmm&id=228",
 )
 
-# 2. 台號區域 (雙欄)
+# 3. 台號區域 (雙欄)
 col1, col2 = st.columns(2)
 with col1:
     start_num = st.number_input("起始台號:", min_value=1, max_value=9999, value=1)
 with col2:
     end_num = st.number_input("結束台號:", min_value=1, max_value=9999, value=100)
 
-# 3. 日期區域 (雙欄)
+# 4. 日期區域 (雙欄)
 today = datetime.now().date()
 col3, col4 = st.columns(2)
 with col3:
@@ -109,9 +100,12 @@ if st.button("🚀 開始擷取數據", type="primary", use_container_width=True
     clean_cookie = re.sub(
         r"^cookie:\s*", "", cookie_input.strip(), flags=re.IGNORECASE
     )
+    clean_proxy = proxy_input.strip()
 
     # 表單驗證
-    if not clean_cookie:
+    if not clean_proxy:
+        st.warning("⚠️ 在 Streamlit Cloud 上執行時，請務必填寫日本住宅 Proxy URL！")
+    elif not clean_cookie:
         st.warning("⚠️ 請先填寫 Cookie！")
     elif not base_url:
         st.warning("⚠️ 請填寫店鋪或頁面 URL！")
@@ -129,6 +123,7 @@ if st.button("🚀 開始擷取數據", type="primary", use_container_width=True
             log_messages.append(msg)
             log_box.code("\n".join(log_messages[-15:]), language="text")
 
+        log(f"使用 Proxy: {re.sub(r'://([^:]+):([^@]+)@', '://***:***@', clean_proxy)}")
         log(f"開始掃描台號範圍：{start_num} ~ {end_num}")
         log(f"篩選日期範圍：{selected_start_date} 至 {selected_end_date}")
 
@@ -140,7 +135,13 @@ if st.button("🚀 開始擷取數據", type="primary", use_container_width=True
                 base_url + "&id={}" if "?" in base_url else base_url + "?id={}"
             )
 
-        # 建立 Session
+        # 設定 Proxy 字典
+        proxies_config = {
+            "http": clean_proxy,
+            "https": clean_proxy,
+        }
+
+        # 建立 Session 與 重試機制
         session = requests.Session()
         retries = Retry(
             total=3, backoff_factor=1.5, status_forcelist=[500, 502, 503, 504]
@@ -194,8 +195,13 @@ if st.button("🚀 開始擷取數據", type="primary", use_container_width=True
                 time.sleep(pause_time)
 
             try:
+                # 帶入 proxies 參數讓請求經過日本住宅 IP
                 resp = session.get(
-                    url, headers=headers, timeout=12, verify=False
+                    url,
+                    headers=headers,
+                    proxies=proxies_config,
+                    timeout=15,
+                    verify=False,
                 )
                 if resp.status_code != 200:
                     log(
@@ -208,7 +214,7 @@ if st.button("🚀 開始擷取數據", type="primary", use_container_width=True
 
                 if "遊技データをご覧のお客様へ" in title:
                     log(
-                        f"❌ 台號 {m_id} 被驗證頁面攔截！請替換最新 Cookie。"
+                        f"❌ 台號 {m_id} 被驗證頁面攔截！請確認 Proxy 是否為日本住宅 IP 或替換最新 Cookie。"
                     )
                     is_blocked = True
                     break
@@ -312,7 +318,7 @@ if st.button("🚀 開始擷取數據", type="primary", use_container_width=True
             except Exception as e:
                 log(f"✕ 抓取失敗 {m_id}: {e}")
 
-            time.sleep(random.uniform(1.0, 1.8))
+            time.sleep(random.uniform(1.2, 2.0))
 
         # 完成數據處理與導出
         if results:
@@ -324,7 +330,6 @@ if st.button("🚀 開始擷取數據", type="primary", use_container_width=True
             other_cols = [c for c in df.columns if c not in base_cols]
             df = df[base_cols + other_cols]
 
-            # 寫入記憶體 Buffer 供下載
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
                 df.to_excel(writer, index=False, sheet_name="Data")
@@ -339,7 +344,7 @@ if st.button("🚀 開始擷取數據", type="primary", use_container_width=True
                 state="complete",
                 expanded=False,
             )
-            st.success("✅ 數據處理成功！可直接點擊下方按鈕下載檔案。")
+            st.success("✅ 數據處理成功！可點擊下方按鈕下載檔案。")
 
             st.download_button(
                 label="📥 下載 Excel 試算表",
@@ -355,7 +360,7 @@ if st.button("🚀 開始擷取數據", type="primary", use_container_width=True
 
         elif is_blocked:
             status_container.update(
-                label="❌ 抓取中斷：被目標網站驗證頁面攔截，請確認 Cookie 後重試。",
+                label="❌ 抓取中斷：遭驗證頁面攔截。請檢查 Proxy 是否屬於「日本住宅 IP」或更換 Cookie。",
                 state="error",
             )
         else:
