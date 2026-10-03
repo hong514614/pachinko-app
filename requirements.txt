@@ -1,5 +1,6 @@
 streamlit
 pandas
-openpyxl
+requests
 beautifulsoup4
-curl_cffi
+urllib3
+openpyxl
