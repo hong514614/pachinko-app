@@ -2,5 +2,5 @@ streamlit
 pandas
 requests
 beautifulsoup4
-urllib3
 openpyxl
+urllib3
