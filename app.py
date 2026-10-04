@@ -23,8 +23,8 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🎰 Pachinko 數據自動擷取工具 v2.1 (Cloud 最佳化版)")
-st.caption("支援在 Streamlit Cloud 執行；若遭 403 阻擋，可於側邊欄輸入 Proxy/代理 IP。")
+st.title("🎰 Pachinko 數據自動擷取工具 v2.2 (條款自動同意版)")
+st.caption("支援在 Streamlit Cloud 執行；包含條款自動同意機制 (Auto-Agree Terms) 與 Proxy 代理功能。")
 
 # -----------------------------------------------------------------------------
 # 側邊欄：代理伺服器 (Proxy) 與進階設定
@@ -34,7 +34,7 @@ proxy_url = st.sidebar.text_input(
     "Proxy 網址 (必填/選填)", 
     value="",
     placeholder="http://username:password@proxy_ip:port",
-    help="由於 Streamlit Cloud 使用 AWS 機房 IP，直連 DMM 常會遇到 403。請在此貼上代理伺服器網址 (如 Tinyproxy: http://IP:3128)。"
+    help="由於 Streamlit Cloud 使用 AWS 機房 IP，直連 DMM 常會遇到 403。請在此貼上代理伺服器網址 (例如：http://156.101.85.129:3128)。"
 )
 
 # 預設使用真實 Android WebView UA，並確保無前綴
@@ -102,7 +102,7 @@ def run_scraping(cookie, base_url, start_num, end_num, selected_start_date, sele
         session.proxies.update(proxies_config)
         log_container.info(f"🌐 已啟用 Proxy 代理：{proxy_str.split('@')[-1] if '@' in proxy_str else proxy_str}")
 
-    # 完整的擬真 Headers（補齊防爬關鍵 Header）
+    # 完整的擬真 Headers
     headers = {
         'Host': 'sunpo-to.a.p-moba.net',
         'User-Agent': clean_ua,
@@ -116,6 +116,35 @@ def run_scraping(cookie, base_url, start_num, end_num, selected_start_date, sele
         'Referer': 'https://sunpo-to.a.p-moba.net/',
         'Cookie': cookie.strip()
     }
+
+    log_messages = []
+    def append_log(msg):
+        log_messages.append(msg)
+        log_container.code("\n".join(log_messages[-15:]))
+
+    # -------------------------------------------------------------------------
+    # 【新增】方法二：自動發送條款同意請求 (Terms Auto-Agree)
+    # -------------------------------------------------------------------------
+    append_log("🔄 正在嘗試自動發送『利用規約同意』請求...")
+    terms_url = "https://sunpo-to.a.p-moba.net/terms.php?site=dmm"
+    try:
+        # 1. 先訪問一次 terms 頁面觸發連線
+        resp_terms_get = session.get(terms_url, headers=headers, timeout=15, verify=False)
+        
+        # 2. 模擬按下同意按鈕 (POST 或導向 GET 帶參)
+        terms_post_headers = headers.copy()
+        terms_post_headers['Content-Type'] = 'application/x-www-form-urlencoded'
+        terms_post_headers['Referer'] = terms_url
+        
+        # 發送同意表單資料 (agree / consent 參數)
+        session.post(terms_url, data={'agree': '1', 'agree_btn': '利用規約に同意する'}, headers=terms_post_headers, timeout=15, verify=False)
+        session.get(f"{terms_url}&agree=1", headers=headers, timeout=15, verify=False)
+        
+        append_log("✅ 條款自動同意請求完成，開始主數據掃描。")
+    except Exception as e:
+        append_log(f"⚠️ 條款自動同意請求失敗 (繼續嘗試主任務): {e}")
+
+    # -------------------------------------------------------------------------
 
     machine_ids = list(range(start_num, end_num + 1))
     results = []
@@ -133,11 +162,6 @@ def run_scraping(cookie, base_url, start_num, end_num, selected_start_date, sele
 
     pachinko_count = 0
     total_machines = len(machine_ids)
-
-    log_messages = []
-    def append_log(msg):
-        log_messages.append(msg)
-        log_container.code("\n".join(log_messages[-15:])) # 畫面上即時顯示最新 15 條日誌
 
     append_log(f"開始掃描台號範圍：{start_num} ~ {end_num}")
     append_log(f"篩選日期範圍：{selected_start_date} 至 {selected_end_date}")
@@ -168,7 +192,7 @@ def run_scraping(cookie, base_url, start_num, end_num, selected_start_date, sele
             title = soup.title.string.strip() if soup.title else ""
             
             if "遊技データをご覧のお客様へ" in title or "安全な接続" in resp.text:
-                append_log(f"❌ 台號 {m_id} 被驗證頁面攔截！請替換最新 Cookie 或檢視 Proxy。")
+                append_log(f"❌ 台號 {m_id} 仍被條款/驗證頁面攔截！建議直接在瀏覽器按同意後更新 Cookie。")
                 st.error("驗證頁面攔截！任務提前終止，請更換 Cookie。")
                 break
 
