@@ -16,12 +16,12 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # 頁面基本設定
 st.set_page_config(
-    page_title="Pachinko 數據自動擷取工具 (Cloud版)",
+    page_title="Pachinko 手動切換 IP 批次擷取工具",
     page_icon="🎰",
     layout="centered",
 )
 
-st.title("🎰 Pachinko 數據自動擷取工具 v2.1 (Streamlit Cloud + Residential Proxy 版)")
+st.title("🎰 Pachinko 數據自動擷取工具 v2.2 (手動 Proxy 切換版)")
 
 # ================= 輔助解析函式 =================
 def extract_led_number(element):
@@ -56,15 +56,12 @@ def extract_led_number(element):
 
 # ================= UI 設定區塊 =================
 
-# 1. Proxy 設定區塊 (方案 B 核心)
-with st.expander("🌐 日本住宅代理 IP 設定 (Proxy Configuration)", expanded=True):
-    st.markdown(
-        "因為部署於 Streamlit Cloud (AWS 機房)，必須掛載**日本住宅代理 (Japan Residential Proxy)** 才能避開驗證頁面。"
-    )
+# 1. 手動 Proxy 輸入區塊
+with st.expander("🌐 手動 Proxy IP 設定 (每批次可更換)", expanded=True):
     proxy_input = st.text_input(
-        "代理伺服器 URL (Proxy URL):",
-        placeholder="http://username:password@proxy.example.com:8080",
-        help="格式例如: http://user:pass@ip:port 或 http://ip:port",
+        "請貼上目前的 Proxy IP:",
+        placeholder="例如 123.45.67.89:8080 或 http://123.45.67.89:8080",
+        help="留空則使用 Streamlit Cloud 預設 IP (極易被擋)。",
     )
 
 # 2. Cookie 與 URL 區塊
@@ -78,7 +75,7 @@ base_url = st.text_input(
     value="https://sunpo-to.a.p-moba.net/game_ctm_machine_detail.php?site=dmm&id=228",
 )
 
-# 3. 台號區域 (雙欄)
+# 3. 台號區域 (建議每批設定 50~100 台)
 col1, col2 = st.columns(2)
 with col1:
     start_num = st.number_input("起始台號:", min_value=1, max_value=9999, value=1)
@@ -95,17 +92,26 @@ with col4:
 
 # ================= 執行邏輯 =================
 
-if st.button("🚀 開始擷取數據", type="primary", use_container_width=True):
-    # 自動過濾 Cookie 開頭可能的 "Cookie:" 字樣與多餘空白
+if st.button("🚀 開始擷取本批次數據", type="primary", use_container_width=True):
     clean_cookie = re.sub(
         r"^cookie:\s*", "", cookie_input.strip(), flags=re.IGNORECASE
     )
     clean_proxy = proxy_input.strip()
 
+    # 自動格式化 Proxy 字串
+    proxies_config = None
+    if clean_proxy:
+        if not clean_proxy.startswith("http://") and not clean_proxy.startswith("https://"):
+            formatted_proxy = f"http://{clean_proxy}"
+        else:
+            formatted_proxy = clean_proxy
+        proxies_config = {
+            "http": formatted_proxy,
+            "https": formatted_proxy,
+        }
+
     # 表單驗證
-    if not clean_proxy:
-        st.warning("⚠️ 在 Streamlit Cloud 上執行時，請務必填寫日本住宅 Proxy URL！")
-    elif not clean_cookie:
+    if not clean_cookie:
         st.warning("⚠️ 請先填寫 Cookie！")
     elif not base_url:
         st.warning("⚠️ 請填寫店鋪或頁面 URL！")
@@ -114,7 +120,6 @@ if st.button("🚀 開始擷取數據", type="primary", use_container_width=True
     elif selected_start_date > selected_end_date:
         st.error("❌ 起始日期不可以大於結束日期！")
     else:
-        # 建立動態狀態顯示區塊
         status_container = st.status("任務啟動中...", expanded=True)
         log_box = st.empty()
         log_messages = []
@@ -123,11 +128,14 @@ if st.button("🚀 開始擷取數據", type="primary", use_container_width=True
             log_messages.append(msg)
             log_box.code("\n".join(log_messages[-15:]), language="text")
 
-        log(f"使用 Proxy: {re.sub(r'://([^:]+):([^@]+)@', '://***:***@', clean_proxy)}")
+        if proxies_config:
+            log(f"🌐 目前使用 Proxy: {formatted_proxy}")
+        else:
+            log("⚠️ 未設定 Proxy，將使用預設 Cloud IP 嘗試直連...")
+
         log(f"開始掃描台號範圍：{start_num} ~ {end_num}")
         log(f"篩選日期範圍：{selected_start_date} 至 {selected_end_date}")
 
-        # URL 格式調整
         if "id=" in base_url:
             url_template = re.sub(r"id=\d+", "id={}", base_url)
         else:
@@ -135,16 +143,9 @@ if st.button("🚀 開始擷取數據", type="primary", use_container_width=True
                 base_url + "&id={}" if "?" in base_url else base_url + "?id={}"
             )
 
-        # 設定 Proxy 字典
-        proxies_config = {
-            "http": clean_proxy,
-            "https": clean_proxy,
-        }
-
-        # 建立 Session 與 重試機制
         session = requests.Session()
         retries = Retry(
-            total=3, backoff_factor=1.5, status_forcelist=[500, 502, 503, 504]
+            total=2, backoff_factor=1, status_forcelist=[500, 502, 503, 504]
         )
         adapter = HTTPAdapter(max_retries=retries)
         session.mount("https://", adapter)
@@ -182,40 +183,37 @@ if st.button("🚀 開始擷取數據", type="primary", use_container_width=True
 
         pachinko_count = 0
         is_blocked = False
+        consecutive_failures = 0  # 失敗計數器
 
         for idx, m_id in enumerate(machine_ids, start=1):
             url = url_template.format(m_id)
 
-            # 防封鎖休眠
             if idx > 1 and idx % 35 == 0:
-                pause_time = random.uniform(8, 15)
-                log(
-                    f"☕ 已連續掃描 {idx} 台，自動暫停 {pause_time:.1f} 秒..."
-                )
+                pause_time = random.uniform(5, 10)
+                log(f"☕ 已連續掃描 {idx} 台，暫停 {pause_time:.1f} 秒...")
                 time.sleep(pause_time)
 
             try:
-                # 帶入 proxies 參數讓請求經過日本住宅 IP
                 resp = session.get(
                     url,
                     headers=headers,
                     proxies=proxies_config,
-                    timeout=15,
+                    timeout=10,
                     verify=False,
                 )
                 if resp.status_code != 200:
-                    log(
-                        f"✕ 台號 {m_id} 回傳狀態碼 {resp.status_code}，跳過"
-                    )
+                    log(f"✕ 台號 {m_id} 回傳狀態碼 {resp.status_code}")
+                    consecutive_failures += 1
+                    if consecutive_failures >= 5:
+                        log("⚠️️ 連續 5 次請求失敗，Proxy 可能已失效！")
+                        break
                     continue
 
                 soup = BeautifulSoup(resp.text, "html.parser")
                 title = soup.title.string.strip() if soup.title else ""
 
                 if "遊技データをご覧のお客様へ" in title:
-                    log(
-                        f"❌ 台號 {m_id} 被驗證頁面攔截！請確認 Proxy 是否為日本住宅 IP 或替換最新 Cookie。"
-                    )
+                    log(f"❌ 台號 {m_id} 被驗證頁面攔截！目前的 Proxy 已被封鎖或 Cookie 過期。")
                     is_blocked = True
                     break
 
@@ -237,20 +235,19 @@ if st.button("🚀 開始擷取數據", type="primary", use_container_width=True
                     or "パチスロ" in clean_title
                 ):
                     if not clean_title.startswith("P"):
-                        time.sleep(0.3)
+                        time.sleep(0.2)
                         continue
 
                 full_text = soup.get_text()
                 if "スロット" in full_text and "パチンコ" not in full_text:
-                    time.sleep(0.3)
+                    time.sleep(0.2)
                     continue
 
-                rate_match = re.search(
-                    r"(\d+(?:\.\d+)?)\s*円", full_text
-                )
+                rate_match = re.search(r"(\d+(?:\.\d+)?)\s*円", full_text)
                 rate_str = f"{rate_match.group(1)}円" if rate_match else "-"
 
                 pachinko_count += 1
+                consecutive_failures = 0  # 成功時歸零
                 day_idx = 0
                 raw_date, real_date = date_mapping[day_idx]
 
@@ -263,17 +260,14 @@ if st.button("🚀 開始擷取數據", type="primary", use_container_width=True
                 }
 
                 for item in items:
-                    text_div = item.find(
-                        "div", class_=lambda c: c and "text" in c
-                    )
+                    text_div = item.find("div", class_=lambda c: c and "text" in c)
                     if not text_div:
                         continue
 
                     label = text_div.get_text(strip=True)
                     img_div = item.find(
                         "div",
-                        class_=lambda c: c
-                        and ("images" in c or "img" in c),
+                        class_=lambda c: c and ("images" in c or "img" in c),
                     )
                     val = extract_led_number(img_div if img_div else item)
 
@@ -311,14 +305,16 @@ if st.button("🚀 開始擷取數據", type="primary", use_container_width=True
                     ):
                         results.append(current_data)
 
-                log(
-                    f"台號 {m_id:3d}: [P] [{rate_str}] 解析成功 ({clean_title})"
-                )
+                log(f"台號 {m_id:3d}: [P] [{rate_str}] 解析成功 ({clean_title})")
 
             except Exception as e:
                 log(f"✕ 抓取失敗 {m_id}: {e}")
+                consecutive_failures += 1
+                if consecutive_failures >= 5:
+                    log("❌ 連續連線失敗 5 次，目前的 Proxy 無法連線！請換一個 Proxy。")
+                    break
 
-            time.sleep(random.uniform(1.2, 2.0))
+            time.sleep(random.uniform(0.8, 1.5))
 
         # 完成數據處理與導出
         if results:
@@ -335,19 +331,17 @@ if st.button("🚀 開始擷取數據", type="primary", use_container_width=True
                 df.to_excel(writer, index=False, sheet_name="Data")
             excel_data = output.getvalue()
 
-            filename = (
-                f"pachinko_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-            )
+            filename = f"pachinko_{start_num}_{end_num}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
 
             status_container.update(
-                label=f"🎉 抓取完成！共取得 {pachinko_count} 台數據",
+                label=f"🎉 本批次抓取完成！共取得 {pachinko_count} 台數據",
                 state="complete",
                 expanded=False,
             )
-            st.success("✅ 數據處理成功！可點擊下方按鈕下載檔案。")
+            st.success(f"✅ 台號 {start_num} ~ {end_num} 處理完畢，請下載 Excel！")
 
             st.download_button(
-                label="📥 下載 Excel 試算表",
+                label=f"📥 下載批次檔 ({start_num}~{end_num})",
                 data=excel_data,
                 file_name=filename,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -355,15 +349,15 @@ if st.button("🚀 開始擷取數據", type="primary", use_container_width=True
                 use_container_width=True,
             )
 
-            st.subheader("📊 數據預覽")
-            st.dataframe(df.head(20), use_container_width=True)
+            st.dataframe(df.head(10), use_container_width=True)
 
         elif is_blocked:
             status_container.update(
-                label="❌ 抓取中斷：遭驗證頁面攔截。請檢查 Proxy 是否屬於「日本住宅 IP」或更換 Cookie。",
+                label="❌ 中斷：目前的 Proxy/IP 被驗證頁面攔截，請輸入新的日本 Proxy IP！",
                 state="error",
             )
         else:
             status_container.update(
-                label="⚠️ 未取得符合選取日期範圍的數據。", state="error"
+                label="⚠️ 批次終止：未取得數據或 Proxy 連線逾時，請替換 Proxy 後重試。",
+                state="error",
             )
