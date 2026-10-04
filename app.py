@@ -9,6 +9,7 @@ from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 import urllib3
 import streamlit as st
+import io
 
 # 關閉 SSL 警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -22,7 +23,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🎰 Pachinko 數據自動擷取工具 v2.0 (Cloud 版)")
+st.title("🎰 Pachinko 數據自動擷取工具 v2.1 (Cloud 最佳化版)")
 st.caption("支援在 Streamlit Cloud 執行；若遭 403 阻擋，可於側邊欄輸入 Proxy/代理 IP。")
 
 # -----------------------------------------------------------------------------
@@ -30,15 +31,17 @@ st.caption("支援在 Streamlit Cloud 執行；若遭 403 阻擋，可於側邊�
 # -----------------------------------------------------------------------------
 st.sidebar.header("⚙️ 網路與代理設定 (防 403 關鍵)")
 proxy_url = st.sidebar.text_input(
-    "Proxy 網址 (必填選填)", 
+    "Proxy 網址 (必填/選填)", 
     value="",
     placeholder="http://username:password@proxy_ip:port",
-    help="由於 Streamlit Cloud 使用 AWS 機房 IP，直連 DMM 常會遇到 403。請在此貼上住宅代理 (Residential Proxy) 或日本 VPS 代理網址。"
+    help="由於 Streamlit Cloud 使用 AWS 機房 IP，直連 DMM 常會遇到 403。請在此貼上代理伺服器網址 (如 Tinyproxy: http://IP:3128)。"
 )
 
+# 預設使用真實 Android WebView UA，並確保無前綴
+default_ua = "Mozilla/5.0 (Linux; Android 12; SM-S938U Build/V417IR; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/110.0.5481.154 Mobile Safari/537.36"
 custom_user_agent = st.sidebar.text_input(
     "User-Agent",
-    value="Mozilla/5.0 (Linux; Android 12; SM-S938U Build/V417IR; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/110.0.5481.154 Mobile Safari/537.36"
+    value=default_ua
 )
 
 # -----------------------------------------------------------------------------
@@ -74,6 +77,9 @@ def extract_led_number(element):
 def run_scraping(cookie, base_url, start_num, end_num, selected_start_date, selected_end_date, proxy_str, user_agent_str, status_container, log_container):
     """執行爬蟲核心任務"""
     
+    # 清洗 User-Agent 防止包含 "User-Agent:" 前綴
+    clean_ua = re.sub(r'^user-agent:\s*', '', user_agent_str.strip(), flags=re.IGNORECASE)
+
     # 替換 URL 中的 id 參數基礎格式
     if "id=" in base_url:
         url_template = re.sub(r'id=\d+', 'id={}', base_url)
@@ -82,7 +88,7 @@ def run_scraping(cookie, base_url, start_num, end_num, selected_start_date, sele
 
     # 建立 Requests Session
     session = requests.Session()
-    retries = Retry(total=3, backoff_factor=1.5, status_forcelist=[500, 502, 503, 504])
+    retries = Retry(total=3, backoff_factor=2, status_forcelist=[500, 502, 503, 504])
     adapter = HTTPAdapter(max_retries=retries)
     session.mount('https://', adapter)
     session.mount('http://', adapter)
@@ -96,14 +102,19 @@ def run_scraping(cookie, base_url, start_num, end_num, selected_start_date, sele
         session.proxies.update(proxies_config)
         log_container.info(f"🌐 已啟用 Proxy 代理：{proxy_str.split('@')[-1] if '@' in proxy_str else proxy_str}")
 
+    # 完整的擬真 Headers（補齊防爬關鍵 Header）
     headers = {
-        'User-Agent': user_agent_str,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Host': 'sunpo-to.a.p-moba.net',
+        'User-Agent': clean_ua,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
         'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
         'X-Requested-With': 'com.dmm.ptown',
+        'Sec-Fetch-Site': 'same-origin',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Dest': 'document',
         'Referer': 'https://sunpo-to.a.p-moba.net/',
-        'Cookie': cookie,
-        'Connection': 'close'
+        'Cookie': cookie.strip()
     }
 
     machine_ids = list(range(start_num, end_num + 1))
@@ -137,23 +148,27 @@ def run_scraping(cookie, base_url, start_num, end_num, selected_start_date, sele
         url = url_template.format(m_id)
         progress_bar.progress(idx / total_machines, text=f"進度：{idx}/{total_machines} (台號 {m_id})")
         
-        # 防封鎖休眠
-        if idx > 1 and idx % 35 == 0:
-            pause_time = random.uniform(8, 15)
+        # 防封鎖休眠（隨機化）
+        if idx > 1 and idx % 25 == 0:
+            pause_time = random.uniform(10, 18)
             append_log(f"☕ 已連續掃描 {idx} 台，自動暫停 {pause_time:.1f} 秒...")
             time.sleep(pause_time)
 
         try:
-            resp = session.get(url, headers=headers, timeout=12, verify=False)
+            resp = session.get(url, headers=headers, timeout=15, verify=False)
+            
             if resp.status_code != 200:
-                append_log(f"✕ 台號 {m_id} 回傳狀態碼 {resp.status_code} (可能遭 IP 封鎖)")
+                append_log(f"✕ 台號 {m_id} 回傳狀態碼 {resp.status_code} (可能遭阻擋/驗證)")
+                if resp.status_code == 403:
+                    st.error(f"台號 {m_id} 遭遇 403 被拒絕存取，請檢查 Cookie 或 Proxy 設定。")
+                    break
                 continue
                 
             soup = BeautifulSoup(resp.text, 'html.parser')
             title = soup.title.string.strip() if soup.title else ""
             
-            if "遊技データをご覧のお客様へ" in title:
-                append_log(f"❌ 台號 {m_id} 被驗證頁面攔截！請替換最新 Cookie。")
+            if "遊技データをご覧のお客様へ" in title or "安全な接続" in resp.text:
+                append_log(f"❌ 台號 {m_id} 被驗證頁面攔截！請替換最新 Cookie 或檢視 Proxy。")
                 st.error("驗證頁面攔截！任務提前終止，請更換 Cookie。")
                 break
 
@@ -161,6 +176,7 @@ def run_scraping(cookie, base_url, start_num, end_num, selected_start_date, sele
             items = soup.find_all('div', class_=lambda c: c and ('c-data-pachinko__item' in c or 'item' in c))
 
             if not items:
+                append_log(f"⚠️ 台號 {m_id}: 無數據或機台未開機/不存在")
                 continue
 
             if clean_title.startswith('S') or "スロット" in clean_title or "パチスロ" in clean_title:
@@ -225,7 +241,8 @@ def run_scraping(cookie, base_url, start_num, end_num, selected_start_date, sele
         except Exception as e:
             append_log(f"✕ 抓取失敗 {m_id}: {e}")
             
-        time.sleep(random.uniform(1.0, 1.8))
+        # 安全請求間隔 (1.5 ~ 3.0 秒)
+        time.sleep(random.uniform(1.5, 3.0))
 
     return results, pachinko_count
 
@@ -297,8 +314,6 @@ if btn_start:
             # 下載 Excel 按鈕
             excel_filename = f"pachinko_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
             
-            # 使用 BytesIO 將 Excel 寫入記憶體供使用者點擊下載
-            import io
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                 df.to_excel(writer, index=False)
@@ -311,4 +326,4 @@ if btn_start:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.error("❌ 未取得符合條件的數據。若回傳狀態皆為 403，代表 Streamlit Cloud 的 IP 已遭 DMM 封鎖，請於左側設定 Proxy。")
+            st.error("❌ 未取得符合條件的數據。若回傳狀態皆為 403，代表目前 IP 已遭 DMM 封鎖，請於左側設定 Proxy。")
